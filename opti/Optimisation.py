@@ -1,175 +1,201 @@
-# version 1.0 
+# Version 1.0
 
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib import cm #https://matplotlib.org/3.1.0/gallery/color/colormap_reference.html
-from mpl_toolkits.mplot3d import axes3d #for 3D plotting
-import copy
-import os
+import time
+from datetime import datetime
+from decimal import Decimal
+import boto3
+from boto3.dynamodb.conditions import Key, Attr
 import uuid
+#https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/GSI.html
 
-os.chdir("D:/School Stuff/01 .400 Capstone/GA & Opti")
-import RBF as RBF #v0.5
-import GA as GA #v2.1a
-import UniformCriterion as UC #v3.0
-import AWS as AWS #v1.0
+DYNAMO_DB = boto3.resource('dynamodb')
+PARAMETERS_MINMAX_TABLE = ""  # To be decided
+OPTIMISATION_RECIPE_TABLE = "LettuceGrowth"
 
-## MISC (How to used the imported RBF, GA and UC)
-# 1a) Sampling
-# Use RBF.LHSsample to get samples
-# # Parameters needed:
-# # xmin - what are the minimum bounds | 1D: [-1]; 2D: [-5, -5]
-# # xmax - what are the maximum bounds | 1D: [1.6]; 2D: [5, 5]
-# # number - how many samples do you want
-# ### Samples = RBF.LHSsample(dimensions,number)
-# ### 1D: Samples = array[[0.1, 0.8, 0.3]] 
-# ### 2D: Samples = array([[0.2, 0.7, 0.3],  << 1st parameter 3 samples
-#                          [0.9, 0.6, 0.2]]) << 2nd parameter 3 samples
-# this assumes a range of 0-1, so if we are using a larger range, we will need to map the results accordingly
-# do this by MULTIPLYING by the range (max-min) and adding the min 
+########### MOK AWS UTILS ###################
+def initialize_parameters_minmax(experiment_id, params):
+    dynamo_table = DYNAMO_DB.Table(PARAMETERS_MINMAX_TABLE)
+    dynamo_table.put_item(
+        Item={
+            'parameters_list': params,
+            'experiment_id': experiment_id,
+        }
+    )
 
-# 1b) Import from AWS
+def create_sample_recipe(experiment_id, duration):
+    parameters_minmax_list = get_saved_parameters_minmax(experiment_id)
+    add_optimisation_recipe(uuid.uuid4(), )
 
-# 2) Prepare Samples 
-# x-values should be in the form 
-# array([[x11,x12,..,x1n],  <- 1st parameter, all x1 to xn values
-#        [x21,x22,..,x2n],
-#    ...,[xi1,xi2,..,xin]]) <- ith parameter, all x1 to xn values
-# this is different from the LHS format!
+def get_saved_parameters_minmax(experiment_id):
+    dynamo_table = dynamodb.Table(PARAMETERS_MINMAX_TABLE)
+    response = dynamo_table.query(
+        KeyConditionExpression=Key('experiment_id').eq(experiment_id)
+    )
+    mins = response['fnmin']
+    maxs = response['fnmax']
+    steps = response['steps']
+    params =response['params_list']
+    return mins, maxs, steps, params
 
-# 3) Optimising hyperparameter
-# use RBF.optimise_c to obtain the appropriate hyperparameter to use. 
-# IMPT: YOU MUST REDEFINE THE RBF WITH THE NEW C
-# # Parameters needed:
-# # x_GT - the past x-values
-# # y_GT - the past (observed) y-values
-# ### c = RBF.optimise_c(x_GT,y_GT)
-# ### def rbf(x):
-# ###    return np.e**(-c*(x**2))
+#############################################
 
-# 4) Acquiring Model
-# use RBF.gen_model to get the beta values to be used for the model input to GA
-# # Parameters needed:
-# # x_GT - the past x-values
-# # y_GT - the past (observed) y-values
-# ### beta = RBF.gen_model(x_GT,y_GT)
-# ### beta = array([[b1],[b2],...,[bi]) where i is number of data points
+def reciperesults(experiment_id, table_name):
+    # interacts with DynamoDB table
+    # returns all data for the given recipe
+    dynamodb = boto3.resource('dynamodb')
+    data = dynamodb.Table(table_name)
+    response = data.query(
+        KeyConditionExpression=Key('experiment_id').eq(experiment_id) #current recipe is take from arg
+    )
+    table_items = response['Items']
+    if len(table_items) == 0:
+        print(f"**** WARNING: No items for experiment {experiment_id} ****")
+    else:
+        print(f"Acquiring items for experiment {experiment_id}...")
+    return table_items
 
-# 5) GA
-# Use GA.RunGA to get next predicted value and x-value
-# # Parameters needed:
-# # parameters_list - a list of parameters (in string form) 
-# # parameters_dict - a dictionary of the parameters and their associate values they can take
-# # number_of_iterations - how many instances of GA to run (the best will be used)
-# # modeldata - a tuple/array containing the beta values from RBF and past x-values 
-# ###(pred_y, new_x) = GA.RunGA(parameters_list, parameters_dict, number_of_iterations, (beta, x_GT))
-# ### pred_y = yn
-# ### new_x = [x1,x2,...,xn]
-
-# 6) UC
-# Use UC.unicri to get the x-value via the uniform criterion
-# # Parameters neded:
-# # x_vals: array of past x values (parameter). array([[],[],...,[]])
-# # xmin: lowest value allowable for x. array([])
-# # xmax: highest value allowable for x. array([])
-# # step_sizes: array of step sizes corresponding to the parameters. array([])
-# ### new_x = UC.unicri(x_GT,xmin,xmax,step_sizes)
-# ### new_x = [x1,x2,...,xn]
-
-
-##  INITIALISATION
-def initialisation(fn_min, fn_max, step_sizes, parameters_list, initial, experiment_id, exp_dur):
-    # fn_min = list of min x vals for parameter eg. [1] for 1D or [1,0] for 2D   #from user **MOK 
-    # fn_max = list of max x vals for parameter eg. [24] #from user **MOK  
-    # step_sizes = list of step sizes for the parameter eg. [0.5]  #from user **MOK
-    # parameters_list = from user as list eg. ['Daylight_Hours'] #List of parameter names **MOK 
-    # initial = number of inital sample points (at least 2n+1 for n parameters) eg. 5 #from user **MOK
-    # experiment_id = name of experiment as string #from user **MOK
-    # exp_dur = duration of experiment in hours as float #from user **MOK
+def getparams(experiment_id, table_name):
+    #gets all x-values and y-values for given recipe from the table
+    table_items = reciperesults(experiment_id, table_name) # gets table data for given recipe
+    x_params = []
+    y_params = []
+    for item in table_items:
+        if item['pending'] == 'false':             ##only add non-pending items
+            x_params.append(item['parameters'])    ##change this if you change the header name for x-params
+            y_params.append(item['actualgrowth'])  ##change this if you change the header name for y-param
+        x_GT = np.array(x_params, dtype=np.float64) #convert to float & same format as used in the other codes
+        y_GT = np.array(y_params, dtype=np.float64)
+    return (x_GT, y_GT)
+        
+def getpending(experiment_id, table_name):
+    #gets items that are still pending an 'actual growth' value
+    table_items = reciperesults(experiment_id, table_name) # gets table data for given recipe
+    pending_uuid = []
+    pending_param = []
+    for i in range(len(table_items)):
+        if table_items[i]['pending'] == 'true':
+            pending_uuid.append(table_items[i]['uuid'])
+            pending_param.append(table_items[i]['parameters'])
     
-    # Stuff for GA
-    table_name='LettuceGrowth'
-    parameters_dict = {}
-    for i in range(len(parameters_list)): #create using above information
-        parameters_dict[parameters_list[i]] = np.arange(fn_min[i], fn_max[i]+step_sizes[i], step_sizes[i])
-        #Dictionary containing the (min/max)  
+    if len(pending_uuid) == 0:
+        print(f"No items pending items for experiment {experiment_id}")
+    else:
+        print(f"{len(pending_uuid)} pending item(s) for experiment {experiment_id}:")
+        for i in range(len(pending_uuid)):
+            print(f"UUID {pending_uuid}—{ np.array(pending_param, dtype=np.float64)}")
+    return pending_uuid
+
+
+def add_optimisation_recipe(uuid, parameters_list, parameters, experiment_id, exp_dur, type):
+    #adds item to table
+    dynamo_db = DYNAMO_DB.Table(OPTIMISATION_RECIPE_TABLE)
+    dec_param = []
+    for i in parameters:
+        dec_param.append(Decimal(i))
+    dynamo_db.put_item(
+        Item={
+            'uuid': uuid,
+            'parameters_list': parameters_list,
+            'parameters': dec_param,
+            'experiment_id': experiment_id,
+            #'actualgrowth':
+            'exp_dur' : exp_dur,
+            'type': type,
+            'pending': 'start',
+            #'timestamp': timestamp
+        })
+    print(f"Added UUID {uuid} to experiment {experiment_id}.")
     
-    # initialise samples
-    lhssample = RBF.LHSsample(fn_min, fn_max, initial) #draw samples using Latin Hypercube Sampling
+def addtime(experiment_id, uuid, timestamp, table_name):
+    #adds time to uuid
+    dynamodb = boto3.resource('dynamodb')
+    data = dynamodb.Table(table_name) 
+    table_items = reciperesults(experiment_id, table_name) #get all items under the experiment
+    temp = {}
+    for item in table_items:
+        if uuid == item['uuid']: # search for the uuid
+            temp = item
+    temp['timestamp'] = Decimal(timestamp) #add timestamp
+    temp['pending'] = 'growth' #change pending from start to growth
+    data.put_item(Item=temp)
+    print(f"Added time {timestamp} to {experiment_id}, UUID: {uuid}")
     
-    # # # #round to the appropriate dp (see step size)
-    x = lhssample #but round to appropirate dp **MOK
-    #x=np.array([[14.0],[5.0],[22.0],[24.0],[18.0]]) for 1D
-    #x=np.array([[ 6.5, 24.5], [ 9.0, 20.0], [ 5.5, 14.5], [ 9.0, 30], [ 5.0, 17.0]]) for 2D
-    # add samples to Dynamodb
-    recipe_uuids = []
-    for item in lhssample:
-        recipe_uuid = uuid.uuid4()
-        recipe_uuids.append(recipe_uuid)
-        AWS.add_optimisation_recipe(recipe_uuid, parameters_list, item, experiment_id, exp_dur, type="init")
-    return recipe_uuids
- 
-## Add start time
-def start_experiment(experiment_id, uuid, timestamp):
-    # experiment_id #from user **MOK
-    # uuid #from user **MOK
-    # timestamp #from user **MOK
-    AWS.addtime(experiment_id, uuid, timestamp)  
-    
-## Add growth score
 def update_growth(experiment_id, uuid, growthscore):
-    # experiment_id #from user **MOK
-    # uuid #from user **MOK
-    # growthscore #from user **MOK
-    AWS.update_growth(experiment_id, uuid, growthscore)  
+    #adds growthscore to uuid
+    try:
+        Decimal(growthscore)
+        dynamodb = boto3.resource('dynamodb')
+        data = dynamodb.Table(OPTIMISATION_RECIPE_TABLE) 
+        table_items = reciperesults(experiment_id, OPTIMISATION_RECIPE_TABLE) #get all items under the experiment
+        temp = {}
+        for item in table_items:
+            if uuid == item['uuid']: # search for the uuid
+                temp = item
+        temp['actualgrowth'] = round(Decimal(growthscore),10) #add timestamp
+        temp['pending'] = 'false' #change pending from growth to false
+        data.put_item(Item=temp)
+        print(f"Added growthscore of {growthscore} to {experiment_id}, UUID: {uuid}")
+    except:
+        print(f"ERROR: growthscore of '{growthscore}' is not valid")
+    
 
 
-## Optimisation
-def do_optimisation(experiment_id, parameters_list, parameters_dict):
-    # experiment_id 
-    # parameters_list
-    # parameters_dict
-    # **MOK need some way to load these 3 params here
-    
-    x_GT, y_GT = AWS.getparams(experiment_id, table_name) #get values from AWS
-    number_of_iterations = 100
-    round = 0    
-    # # RBF
-    #reacquire hyperparameter
-    c = RBF.optimise_c(x_GT,y_GT)
-    #redefine rbf
-    def rbf(x):
-        return np.e**(-c*(x**2))
-    #get model    
-    beta = RBF.gen_model(x_GT,y_GT) # using actual values
-    
-    # # GA
-    #RunGA with list of parameters, dictionary of parameters, number of iterations and , beta + GT values
-    (pred_y, new_x) = GA.RunGA(parameters_list, parameters_dict, number_of_iterations, (beta, x_GT))
-        # pred_y = predicted growth score (float)
-        # new_x = list of parameters
-    print(f"Optimal point at parameters {new_x} for {parameters_list}. Est. growth = {pred_y}")
-    
-    #generate uuid **MOK
-    AWS.add_optimisation_recipe(uuid, parameters_list, new_x, experiment_id, type='optim')
-    return (pred_y, new_x) #to display to user **MOK
+def filltable():
+    dynamodb = boto3.resource('dynamodb')
+    data = dynamodb.Table(table_name)
+    data.put_item(
+        Item={
+            'uuid': '1',
+            'parameters_list': parameters_list,
+            'parameters': [Decimal('14.0')],
+            'experiment_id': '1d_test',
+            'actualgrowth': Decimal('918.53108652'), 
+            'exp_dur': Decimal('72'),
+            'type': 'init',
+            'pending': 'false',
+            'timestamp': 1559620800,
+        })
+        
+    data.put_item(Item={'uuid': '2','parameters_list': parameters_list,'parameters':  [Decimal('5.0')],'experiment_id': '1d_test','actualgrowth': Decimal('396.20033535'), 'exp_dur': Decimal('72'), 'type': 'init','pending': 'false','timestamp': 1560744000})
+    data.put_item(Item={'uuid': '3','parameters_list': parameters_list,'parameters':  [Decimal('22.0')],'experiment_id': '1d_test','actualgrowth': Decimal('3804.8058396'), 'exp_dur': Decimal('72'), 'type': 'init','pending': 'false','timestamp': 1561021200})
+    data.put_item(Item={'uuid': '4','parameters_list': parameters_list,'parameters':  [Decimal('24.0')],'experiment_id': '1d_test','actualgrowth': Decimal('1943.87051092'), 'exp_dur': Decimal('72'), 'type': 'opti','pending': 'false','timestamp': 1561365000})
+    data.put_item(Item={'uuid': '5','parameters_list': parameters_list,'parameters':  [Decimal('18.0')],'experiment_id': '1d_test','actualgrowth': Decimal('606.21632107'), 'exp_dur': Decimal('72'), 'type': 'opti','pending': 'false','timestamp': 1562214600})
+    data.put_item(Item={'uuid': '6','parameters_list': parameters_list,'parameters':  [Decimal('9.5')],'experiment_id': '1d_test','actualgrowth': Decimal('670.32018962'), 'exp_dur': Decimal('72'), 'type': 'opti','pending': 'false','timestamp': 1562558400})
 
-## Exploration
-def do_exploration(experiment_id, parameters_list, parameters_dict, fn_min, fn_max, step_sizes):    
-    # experiment_id 
-    # parameters_list
-    # parameters_dict
-    # fn_min
-    # fn_max
-    # step_sizes
-    # **MOK need some way to load these 6 params here
-    
-    uc_x = UC.unicri(x_GT,np.array(fn_min),np.array(fn_max),np.array(step_sizes))
-    # round uc_x to appropriate dp (based on step_sizes) #**MOK
-    print(f"Exploration point at parameters {uc_x} for {parameters_list}.")
-    
-    #generate uuid **MOK
-    AWS.add_optimisation_recipe(uuid, parameters_list, new_x, experiment_id, type='explore',)
-    return uc_x #to display to user **MOK
+    data.put_item(
+        Item={
+            'uuid': '7',
+            'parameters_list': parameters_list,
+            'parameters':  [Decimal('20.5')],
+            'experiment_id': '1d_test',
+            'exp_dur': Decimal('72'),
+            #'actualgrowth': Decimal('1474.51903652'), 
+            'type': 'opti',
+            'pending': 'growth',#'false',
+            'timestamp': 1562832000
+        })
+
+##testing stuff
+# def main():
+#     recipe = '1d_test'
+#     print("getpending")
+#     getpending(recipe)
+#     print("\ngetparam")
+#     g = getparams(recipe)
+#     print(f"X_GT: {g[0]}\nY_GT: {g[1]}")
+# 
+# main()
+# 
+# experiment_id = '1d_test'
+
+
+
+
+
+
+
+
+
 
 
